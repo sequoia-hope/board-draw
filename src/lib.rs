@@ -17,11 +17,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 mod draw;
 mod hit;
+mod labels;
 mod mesh;
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
 pub use draw::{Drawing, Span};
+pub use labels::{LABEL_MAX_MM, Label};
 pub use mesh::{Mesh, STRIDE, circle_points};
 
 pub type Rgba = [f32; 4];
@@ -181,6 +183,10 @@ pub struct Style {
     pub hot_net: Option<i32>,
     /// Whether zones are drawn: as poured, or before they are, as their outlines.
     pub show_pours: bool,
+    /// Sides turned off: parts on them are not picked or labelled. Drawing a side away is the
+    /// layers' business (visibility or the mask).
+    pub hide_front: bool,
+    pub hide_back: bool,
 }
 
 /// A part's extent in its own frame, kept up to date as its items come and go.
@@ -190,11 +196,13 @@ struct Extent {
     bounds: [f32; 4],
     /// Discs `[x, y, r]` whose union's box is the extent however the part is turned.
     discs: Vec<[f32; 3]>,
+    /// The area of its courtyard polygons, if it has any.
+    courtyard: Option<f32>,
 }
 
 impl Extent {
     fn new() -> Extent {
-        Extent { bounds: [f32::MAX, f32::MAX, f32::MIN, f32::MIN], discs: Vec::new() }
+        Extent { bounds: [f32::MAX, f32::MAX, f32::MIN, f32::MIN], discs: Vec::new(), courtyard: None }
     }
 
     fn grow(&mut self, x: f32, y: f32) {
@@ -216,9 +224,12 @@ impl Extent {
                     }
                 }
             }
-            Geom::Area { kind: AreaKind::Body | AreaKind::Courtyard, tiles } => {
+            Geom::Area { kind: kind @ (AreaKind::Body | AreaKind::Courtyard), tiles } => {
                 for (_, g) in tiles {
                     self.add_points(g);
+                    if *kind == AreaKind::Courtyard {
+                        *self.courtyard.get_or_insert(0.0) += polygon_area(g);
+                    }
                 }
             }
             _ => {}
@@ -269,6 +280,18 @@ pub fn kicad_color(layer: usize, count: usize, name: &str) -> Rgba {
             rgb(40.0, 204.0, 217.0),
         ][(layer - 1) % 6]
     }
+}
+
+/// The area a simple polygon `[x0, y0, x1, y1, ...]` encloses.
+pub fn polygon_area(g: &[f32]) -> f32 {
+    let n = g.len() / 2;
+    let twice: f32 = (0..n)
+        .map(|i| {
+            let j = (i + 1) % n;
+            g[2 * i] * g[2 * j + 1] - g[2 * j] * g[2 * i + 1]
+        })
+        .sum();
+    twice.abs() / 2.0
 }
 
 pub fn with_alpha(c: Rgba, a: f32) -> Rgba {
@@ -352,6 +375,18 @@ impl Scene {
     /// Whether a layer is visible; layers the scene does not have are.
     pub fn visible(&self, layer: usize) -> bool {
         self.layers.get(layer).is_none_or(|l| l.visible)
+    }
+
+    /// Whether a layer is on the back: a `B.` layer, or the last of several whose names say
+    /// nothing of sides.
+    pub fn back_layer(&self, layer: usize) -> bool {
+        let n = self.layers.len();
+        match self.layers.get(layer) {
+            Some(l) if l.name.starts_with("B.") => true,
+            Some(l) if l.name.starts_with("F.") => false,
+            Some(_) => n > 1 && layer == n - 1 && !self.layers.iter().any(|l| l.name.starts_with("B.")),
+            None => false,
+        }
     }
 
     /// Whether a layer is drawn under `mask`, a bit per layer from the front.
@@ -469,7 +504,24 @@ impl Scene {
         self.parts.iter().map(|(id, p)| (*id, p))
     }
 
+    /// Adds a whole part with its items, replacing any part and items it had. Like any change
+    /// but a pose, it costs the next [`Scene::redraw`] one rebuild, however many items it has.
+    pub fn insert_part(&mut self, id: i32, name: &str, pose: Pose, items: Vec<(u32, Item)>) {
+        self.remove_part(id);
+        self.parts.insert(id, Part { name: name.to_string(), pose });
+        for (item_id, mut item) in items {
+            item.part = id;
+            self.insert(item_id, item);
+        }
+        self.changed();
+    }
+
+    /// Removes a part and every item it owns, at once: one rebuild for the next redraw.
     pub fn remove_part(&mut self, id: i32) -> Option<Part> {
+        for item in self.owned.remove(&id).into_iter().flatten() {
+            self.items.remove(&item);
+        }
+        self.extents.remove(&id);
         let part = self.parts.remove(&id);
         self.changed();
         part
@@ -496,6 +548,44 @@ impl Scene {
         for part in self.parts.values_mut() {
             part.pose = Pose::default();
         }
+    }
+
+    /// The layers the part's pads and areas sit on, as placed.
+    fn part_layers(&self, part: i32) -> impl Iterator<Item = usize> + '_ {
+        let bottom = self.pose(part).bottom;
+        self.part_items(part).flat_map(move |id| {
+            let layers: Vec<usize> = match &self.items[&id].geom {
+                Geom::Pad { pads, .. } => pads.iter().map(|(l, _)| *l).collect(),
+                Geom::Area { tiles, .. } => tiles.iter().map(|(l, _)| *l).collect(),
+                _ => Vec::new(),
+            };
+            layers.into_iter().map(move |l| self.placed_layer(l, bottom))
+        })
+    }
+
+    /// Whether the part is on the back: everything it has on a layer is on back layers. A
+    /// through-hole part is on the front.
+    pub fn part_on_back(&self, part: i32) -> bool {
+        let mut any = false;
+        for l in self.part_layers(part) {
+            if !self.back_layer(l) {
+                return false;
+            }
+            any = true;
+        }
+        any
+    }
+
+    /// Whether the part can be picked and labelled: its side is not hidden, and some layer it
+    /// is on is visible.
+    pub fn part_pickable(&self, part: i32) -> bool {
+        let hidden = if self.part_on_back(part) { self.style.hide_back } else { self.style.hide_front };
+        !hidden && self.part_layers(part).any(|l| self.visible(l))
+    }
+
+    /// The part's courtyard area, if it has a courtyard.
+    pub fn courtyard_area(&self, part: i32) -> Option<f32> {
+        self.extents.get(&part).and_then(|e| e.courtyard)
     }
 
     /// Whether any of the part's pads is on a layer drawn under `mask`.

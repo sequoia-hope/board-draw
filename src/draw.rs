@@ -420,4 +420,37 @@ mod tests {
         assert!((v[7] - kicad_color(1, 2, "B.Cu")[0] * DIMMED).abs() < 1e-6);
         assert_eq!(v[v.len() - STRIDE + 7], kicad_color(0, 2, "F.Cu")[0]);
     }
+
+    #[test]
+    fn adding_or_removing_a_whole_part_costs_one_rebuild() {
+        let mut s = board();
+        for p in 1..=10 {
+            add_part(&mut s, p, p as u32 * 10);
+        }
+        let mut d = s.draw(0.02, u64::MAX);
+        // A keep-out part with no pads, added and later taken away whole.
+        let keepout = vec![(
+            500,
+            Item::new(0, 0, Geom::Area { kind: AreaKind::Keepout, tiles: vec![(0, vec![0.0, 0.0, 3.0, 0.0, 3.0, 3.0, 0.0, 3.0])] }),
+        )];
+        s.insert_part(99, "KO1", Pose::at(40.0, 0.0), keepout);
+        assert_eq!(s.item(500).map(|i| i.part), Some(99), "items take the part's id");
+        assert!(s.redraw(&mut d, 0.02, u64::MAX));
+        assert_eq!(d.vertices, s.draw(0.02, u64::MAX).vertices);
+        assert!(!s.redraw(&mut d, 0.02, u64::MAX), "one rebuild, then nothing to do");
+        // Moving it afterwards is a patch again.
+        s.set_pose(99, Pose::at(41.0, 0.0));
+        assert!(s.redraw(&mut d, 0.02, u64::MAX));
+        assert_eq!(d.vertices, s.draw(0.02, u64::MAX).vertices);
+
+        let with = d.vertices.len();
+        let before = s.items().count();
+        s.remove_part(3);
+        assert_eq!(s.items().count(), before - 3, "its items go with it");
+        assert!(s.part(3).is_none() && s.part_box(3).is_none() && s.part_items(3).next().is_none());
+        assert!(s.redraw(&mut d, 0.02, u64::MAX));
+        assert!(d.vertices.len() < with);
+        assert_eq!(d.vertices, s.draw(0.02, u64::MAX).vertices);
+        assert!(!s.redraw(&mut d, 0.02, u64::MAX));
+    }
 }

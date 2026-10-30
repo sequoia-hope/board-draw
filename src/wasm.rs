@@ -157,6 +157,18 @@ impl Board {
         self.scene.set_part(id, name);
     }
 
+    /// Adds a whole part with its items, `[[id, item], ...]` with items as the module's docs
+    /// show (their `part` is set to `id`), replacing what the part had. Costs one rebuild at
+    /// the next `mesh` or `update`, however many items.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_part(&mut self, id: i32, name: &str, x: f32, y: f32, rotation: f32, bottom: bool, items: &str) -> Result<(), JsError> {
+        let raw: Vec<(u32, serde_json::Value)> = serde_json::from_str(items)?;
+        let items = raw.into_iter().map(|(i, v)| Ok((i, item(&v.to_string())?))).collect::<Result<Vec<_>, JsError>>()?;
+        self.scene.insert_part(id, name, Pose { x, y, rotation, bottom }, items);
+        Ok(())
+    }
+
+    /// Removes a part and all its items.
     pub fn remove_part(&mut self, id: i32) {
         self.scene.remove_part(id);
     }
@@ -195,6 +207,19 @@ impl Board {
         self.scene.style.show_pours = on;
     }
 
+    /// Turns a side off for picking and labels: `back` false for the front, true for the back.
+    pub fn set_side_hidden(&mut self, back: bool, hidden: bool) {
+        if back {
+            self.scene.style.hide_back = hidden;
+        } else {
+            self.scene.style.hide_front = hidden;
+        }
+    }
+
+    pub fn part_on_back(&self, part: i32) -> bool {
+        self.scene.part_on_back(part)
+    }
+
     /// The vertices for `Renderer.upload`: `px` is one screen pixel in millimetres, `mask` a
     /// bit per layer from the front. Kept between calls; moving parts rewrites only theirs.
     pub fn mesh(&mut self, px: f32, mask: u32) -> Vec<f32> {
@@ -228,6 +253,25 @@ impl Board {
 
     pub fn part_at(&self, x: f32, y: f32) -> Option<i32> {
         self.scene.part_at(x, y)
+    }
+
+    /// Every part under the point in picking order: front before back, then smallest courtyard
+    /// (or box) first.
+    pub fn part_ids_at(&self, x: f32, y: f32) -> Vec<i32> {
+        self.scene.part_ids_at(x, y)
+    }
+
+    /// Labels to write on an overlay canvas, as JSON `[{"id", "name", "x", "y", "size"}]`:
+    /// size is the text height in millimetres. Parts whose text would be under `min_px` tall
+    /// at `px_per_mm` are left out, unless they are in `selected`.
+    pub fn labels(&self, px_per_mm: f32, min_px: f32, selected: Vec<i32>) -> String {
+        let labels: Vec<_> = self
+            .scene
+            .labels(px_per_mm, min_px, &selected)
+            .into_iter()
+            .map(|l| serde_json::json!({"id": l.part, "name": l.name, "x": l.at[0], "y": l.at[1], "size": l.size}))
+            .collect();
+        serde_json::Value::Array(labels).to_string()
     }
 
     pub fn net_at(&self, x: f32, y: f32, reach: f32) -> Option<i32> {

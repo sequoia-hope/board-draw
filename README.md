@@ -43,7 +43,18 @@ s.set_pose(7, Pose { x: 12.0, y: 4.0, rotation: 90.0, bottom: false });
 | `Geom::Area` | polygons on layers. The kinds are `Keepout`, `ViaKeepout`, `Pour` (a zone outline, drawn until poured copper exists), `Body` and `Courtyard`. |
 | `Fill` | poured copper, as convex polygons (`set_fills`) |
 | `Part` | a name and a `Pose`: `x`, `y`, `rotation` in degrees anticlockwise, `bottom`. Items with `part != 0` are in that part's frame. |
-| `Style` | `active_layer` (drawn last, and the only bright layer in `high_contrast`), `hot_net` (drawn lighter), `show_pours` |
+| `Style` | `active_layer` (drawn last, and the only bright layer in `high_contrast`), `hot_net` (drawn lighter), `show_pours`, and `hide_front` / `hide_back` (sides turned off for picking and labels) |
+
+### Adding and removing whole parts
+
+`insert_part(id, name, pose, items)` adds a part with all its items in one call. It replaces
+anything the part had, and each item takes the part's id. `remove_part(id)` removes the part
+together with every item it owns.
+
+Neither call is meant for every frame. Each one marks the scene changed, so the next `redraw`
+does one full rebuild (about 1.2 ms for 200 parts), however many items came or went. Use them
+for things like adding a fixed keep-out part at runtime. Use `set_pose` for anything that
+moves.
 
 Shapes (`Prim`) are a disc `[x, y, r]` or a convex polygon `[x0, y0, x1, y1, ...]`. Polygons
 with more than 24 corners are drawn as their edge.
@@ -91,7 +102,8 @@ Within a pass, items are drawn in id order.
 | Call | Returns |
 | --- | --- |
 | `part_box(part)` | the part's extent over its pads, body and courtyard, as placed: `[x0, y0, x1, y1]` |
-| `part_at(x, y)` | the smallest part whose box holds the point |
+| `part_at(x, y)` | the part a click means: the first of `part_ids_at` |
+| `part_ids_at(x, y)` | every pickable part whose box holds the point, in picking order |
 | `net_at(x, y, reach)` | the net of the nearest copper |
 | `item_at(x, y, reach)` | the id of the nearest copper item |
 
@@ -101,6 +113,38 @@ For `net_at` and `item_at`:
 - a pad or via counts as a disc of 0.3 mm about its centre.
 
 Part extents are cached in the part's own frame. A pose change is therefore free for picking.
+
+**Picking order.** Parts are ordered by these rules, in turn:
+
+1. Parts on the front come before parts on the back.
+2. Smaller parts come first. A part is measured by its courtyard area, or by its box area if it
+   has no courtyard.
+3. Ties go by part id.
+
+So a 0402 sitting on a QFN's courtyard is picked before the QFN, and a part on the back never
+takes a click from a part on the front.
+
+A part is on the back when everything it has on layers sits on back layers (`B.x`, or the
+last layer when no names say `B.`). That covers both a part posed `bottom: true` and a part
+whose pads are given on `B.Cu`. A through-hole part counts as front.
+
+A part is left out of picking when its side is hidden (`style.hide_front` / `hide_back`), or
+when every layer it is on is hidden.
+
+## Labels
+
+There is no text in WebGL. The app writes references itself, on a 2D canvas over the WebGL one.
+`labels(px_per_mm, min_px, selected)` says what to write, where and how big:
+
+- It gives one `Label` per named, pickable part: `{ part, name, at, size }`.
+- `at` is the centre of the part's box, in board millimetres.
+- `size` is a suggested text height in millimetres. It is as large as fits the box and at most
+  2.5 mm.
+- A part is left out when its text would be shorter than `min_px` at `px_per_mm`, unless it is
+  in `selected`. A selected part is always included, and its text is raised to `min_px`.
+
+To draw a label, put its centre on screen with your view transform and set the font to
+`size * px_per_mm` pixels.
 
 ## Timing
 
@@ -145,7 +189,11 @@ const renderer = new Renderer(canvas);
 renderer.upload(0, board.mesh(1 / zoom, 0xffffffff));      // kept between calls; patched on moves
 renderer.clear([0, 16 / 255, 35 / 255]);
 renderer.draw(0, { cx, cy, zoom }, { x: 0, y: 0, w: canvas.width, h: canvas.height }, false);
-board.part_at(x, y); board.net_at(x, y, 0.3); board.item_at(x, y, 0.3); board.part_box(7);
+board.part_at(x, y); board.part_ids_at(x, y); board.net_at(x, y, 0.3); board.item_at(x, y, 0.3); board.part_box(7);
+board.set_side_hidden(true, true);                          // back side off for picking and labels
+JSON.parse(board.labels(zoom, 7, new Int32Array([7])));     // [{id, name, x, y, size}]
+board.add_part(20, 'KO1', 30, 5, 0, false, JSON.stringify([[100, { area: { kind: 'keepout', tiles: [[0, [0, 0, 3, 0, 3, 3, 0, 3]]] } }]]));
+board.remove_part(20);                                      // with its items
 ```
 
 `board.update(px, mask)` refreshes the drawing without copying it. You can then view it with

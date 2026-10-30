@@ -43,14 +43,27 @@ impl Scene {
         Some(out)
     }
 
-    /// The smallest part whose extent holds the point.
+    /// The part a click at the point means: the first of [`Scene::part_ids_at`].
     pub fn part_at(&self, x: f32, y: f32) -> Option<i32> {
-        self.parts
+        self.part_ids_at(x, y).first().copied()
+    }
+
+    /// Every pickable part whose box ([`Scene::part_box`]) holds the point, in picking order:
+    /// parts on the front before parts on the back, then the smallest first, by courtyard area
+    /// or, for a part without a courtyard, by box area; then by id. So a small part sitting on
+    /// a large part's courtyard is picked, and a part underneath never takes a click from one
+    /// on top. Parts on a hidden side, or with all their layers hidden, are left out.
+    pub fn part_ids_at(&self, x: f32, y: f32) -> Vec<i32> {
+        let mut hits: Vec<(bool, f32, i32)> = self
+            .parts
             .keys()
             .filter_map(|&p| self.part_box(p).map(|b| (p, b)))
             .filter(|(_, b)| x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3])
-            .min_by(|a, b| area(&a.1).total_cmp(&area(&b.1)))
-            .map(|(p, _)| p)
+            .filter(|(p, _)| self.part_pickable(*p))
+            .map(|(p, b)| (self.part_on_back(p), self.courtyard_area(p).unwrap_or_else(|| area(&b)), p))
+            .collect();
+        hits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)).then(a.2.cmp(&b.2)));
+        hits.into_iter().map(|(_, _, p)| p).collect()
     }
 
     /// The copper item nearest the point within `reach` millimetres, of those `want` accepts:
@@ -184,5 +197,87 @@ mod tests {
         assert_eq!(s.part_box(7), Some([1.5, 1.5, 2.5, 2.5]));
         s.remove(2);
         assert_eq!(s.part_box(7), None);
+    }
+
+    fn rect(x: f32, y: f32, hw: f32, hh: f32) -> Vec<f32> {
+        vec![x - hw, y - hh, x + hw, y - hh, x + hw, y + hh, x - hw, y + hh]
+    }
+
+    /// A QFN with a 7 mm courtyard, and a 0402 sitting on that courtyard just off its pads.
+    fn qfn_and_0402() -> Scene {
+        let mut s = Scene::new();
+        s.set_layers(&["F.Cu", "In1.Cu", "B.Cu"]);
+        let mut qfn = vec![(10, Item::new(0, 0, Geom::Area { kind: AreaKind::Courtyard, tiles: vec![(0, rect(0.0, 0.0, 3.5, 3.5))] }))];
+        for k in 0..8 {
+            let x = -2.1 + k as f32 * 0.6;
+            qfn.push((
+                11 + k,
+                Item::new(k as i32 + 1, 0, Geom::Pad { at: [x, -2.4], pads: vec![(0, Prim::Poly(rect(x, -2.4, 0.15, 0.4)))], drill: None }),
+            ));
+        }
+        s.insert_part(1, "U1", Pose::default(), qfn);
+        s.insert_part(
+            2,
+            "C7",
+            Pose::at(2.8, 2.8),
+            vec![
+                (30, Item::new(1, 0, Geom::Pad { at: [-0.5, 0.0], pads: vec![(0, Prim::Poly(rect(-0.5, 0.0, 0.25, 0.3)))], drill: None })),
+                (31, Item::new(2, 0, Geom::Pad { at: [0.5, 0.0], pads: vec![(0, Prim::Poly(rect(0.5, 0.0, 0.25, 0.3)))], drill: None })),
+                (32, Item::new(0, 0, Geom::Area { kind: AreaKind::Courtyard, tiles: vec![(0, rect(0.0, 0.0, 0.95, 0.45))] })),
+            ],
+        );
+        s
+    }
+
+    #[test]
+    fn a_small_part_on_a_large_ones_courtyard_is_picked_first() {
+        let s = qfn_and_0402();
+        assert_eq!(s.courtyard_area(1), Some(49.0));
+        assert_eq!(s.part_at(2.8, 2.8), Some(2));
+        assert_eq!(s.part_ids_at(2.8, 2.8), vec![2, 1]);
+        assert_eq!(s.part_ids_at(0.0, 0.0), vec![1]);
+        assert_eq!(s.part_ids_at(9.0, 9.0), Vec::<i32>::new());
+    }
+
+    #[test]
+    fn a_part_on_the_back_never_takes_a_click_from_one_on_the_front() {
+        let mut s = qfn_and_0402();
+        // A tiny part under the QFN, on the back by its layer and by its pose.
+        s.insert_part(
+            3,
+            "R1",
+            Pose::default(),
+            vec![(40, Item::new(0, 0, Geom::Pad { at: [0.0, 0.0], pads: vec![(2, Prim::Circle([0.0, 0.0, 0.2]))], drill: None }))],
+        );
+        s.insert_part(
+            4,
+            "R2",
+            Pose { bottom: true, ..Pose::default() },
+            vec![(41, Item::new(0, 0, Geom::Pad { at: [0.0, 0.0], pads: vec![(0, Prim::Circle([0.0, 0.0, 0.3]))], drill: None }))],
+        );
+        assert!(!s.part_on_back(1) && s.part_on_back(3) && s.part_on_back(4));
+        assert_eq!(s.part_ids_at(0.0, 0.0), vec![1, 3, 4]);
+        // With the front hidden the back's parts are picked, the smallest first.
+        s.style.hide_front = true;
+        assert_eq!(s.part_ids_at(0.0, 0.0), vec![3, 4]);
+        assert_eq!(s.part_at(2.8, 2.8), None);
+        s.style.hide_front = false;
+        s.style.hide_back = true;
+        assert_eq!(s.part_ids_at(0.0, 0.0), vec![1]);
+        // Hiding the layers a part is on hides it from picking too.
+        s.style.hide_back = false;
+        s.set_layer_visible(2, false);
+        assert_eq!(s.part_ids_at(0.0, 0.0), vec![1]);
+        s.set_layer_visible(0, false);
+        assert_eq!(s.part_ids_at(0.0, 0.0), Vec::<i32>::new());
+    }
+
+    #[test]
+    fn a_through_hole_part_is_on_the_front() {
+        let mut s = Scene::new();
+        s.set_layers(&["F.Cu", "B.Cu"]);
+        let pads = vec![(0, Prim::Circle([0.0, 0.0, 0.8])), (1, Prim::Circle([0.0, 0.0, 0.8]))];
+        s.insert_part(1, "J1", Pose::default(), vec![(1, Item::new(0, 0, Geom::Pad { at: [0.0, 0.0], pads, drill: Some(0.5) }))]);
+        assert!(!s.part_on_back(1));
     }
 }
