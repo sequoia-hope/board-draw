@@ -204,6 +204,8 @@ The `wasm.rs` module docs list the item JSON format.
 
 The renderer's API:
 
+- `new Renderer(canvas, { yDown })`: with `yDown: true` the board's y grows downwards on screen,
+  as in KiCad's frame; by default it grows upwards.
 - `upload(slot, vertices)`: one mesh per slot.
 - `clear(rgb)`.
 - `draw(slot, view, rect, mirror)`. The view is `{cx, cy, zoom}` in millimetres and pixels per

@@ -42,7 +42,10 @@ function compile(gl, type, source) {
 }
 
 export class Renderer {
-  constructor(canvas) {
+  // options.yDown: the board's y grows downwards on screen, as in KiCad's own frame; by default
+  // it grows upwards.
+  constructor(canvas, options = {}) {
+    this.yDown = Boolean(options.yDown);
     const gl = canvas.getContext('webgl2', { antialias: false, premultipliedAlpha: true });
     if (!gl) throw new Error('This browser has no WebGL2.');
     this.gl = gl;
@@ -113,7 +116,7 @@ export class Renderer {
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.useProgram(this.program);
     const sx = ((mirror ? -2 : 2) * view.zoom) / rect.w;
-    const sy = (2 * view.zoom) / rect.h;
+    const sy = ((this.yDown ? -2 : 2) * view.zoom) / rect.h;
     gl.uniform2f(this.uniforms.scale, sx, sy);
     gl.uniform2f(this.uniforms.offset, -view.cx * sx, -view.cy * sy);
     gl.uniform1f(this.uniforms.px, 1 / view.zoom);
