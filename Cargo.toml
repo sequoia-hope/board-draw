@@ -1,0 +1,22 @@
+[package]
+name = "board-draw"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "A printed circuit board scene in millimetres, meshed for a WebGL2 capsule shader, with hit testing and cheap part moves."
+repository = "https://github.com/sequoia-hope/board-draw"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The JS bindings: a `Board` class over a scene and its cached drawing.
+wasm = ["dep:wasm-bindgen", "dep:serde", "dep:serde_json"]
+
+[dependencies]
+serde = { version = "1.0.219", features = ["derive"], optional = true }
+serde_json = { version = "1.0.140", optional = true }
+wasm-bindgen = { version = "0.2.129", optional = true }
+
+[profile.release]
+opt-level = 3
